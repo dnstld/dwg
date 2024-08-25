@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import axios from "axios";
 
 // Function to get Forge token
@@ -25,6 +25,7 @@ const getForgeToken = async () => {
           "Content-Type": "application/x-www-form-urlencoded",
           Accept: "application/json",
           Authorization: `Basic ${btoa(`${clientId}:${clientSecret}`)}`,
+          "Access-Control-Allow-Origin": "*",
         },
       }
     );
@@ -40,7 +41,6 @@ const getForgeToken = async () => {
 
 // Function to generate a unique bucket key
 const generateUniqueBucketKey = () => {
-  // You can customize this function to generate a more appropriate unique key
   return `bucket-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
 };
 
@@ -55,12 +55,13 @@ const handleBucketAndUpload = async (token: string, file: File) => {
         `https://developer.api.autodesk.com/oss/v2/buckets`,
         {
           bucketKey: bucketKey,
-          policyKey: "transient", // or 'persistent'
+          policyKey: "transient",
         },
         {
           headers: {
             Authorization: `Bearer ${token}`,
             "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
           },
         }
       );
@@ -80,26 +81,16 @@ const handleBucketAndUpload = async (token: string, file: File) => {
     // Upload file
     const uploadResponse = await axios.put(
       `https://developer.api.autodesk.com/oss/v2/buckets/${bucketKey}/objects/${file.name}`,
-      file, // Directly send the file content here
+      file,
       {
         headers: {
           Authorization: `Bearer ${token}`,
           "Content-Type": file.type || "application/octet-stream",
+          "Access-Control-Allow-Origin": "*",
         },
       }
     );
 
-    // uploadResponseExample = {
-    //   "bucketKey": "bucket-000000000000-mu5quhmaq",
-    //   "contentType": "application/octet-stream",
-    //   "location": "https://developer.api.autodesk.com/oss/v2/buckets/bucket-000000000000-mu5quhmaq/objects/EQT1-REGU-E05-400-R1D-1.dwg",
-    //   "objectId": "urn:adsk.objects:os.object:bucket-000000000000-mu5quhmaq/EQT1-REGU-E05-400-R1D-1.dwg",
-    //   "objectKey": "EQT1-REGU-E05-400-R1D-1.dwg",
-    //   "sha1": "000000000000000000000",
-    //   "size": 133991
-    // }
-
-    console.log("Upload Response:", uploadResponse.data);
     return {
       bucketKey,
       objectId: uploadResponse.data.objectId,
@@ -116,29 +107,44 @@ const handleBucketAndUpload = async (token: string, file: File) => {
 // Function to request translation
 const translateDWGFile = async (token: string, urn: string) => {
   try {
-    const response = await axios.post(
-      "https://developer.api.autodesk.com/modelderivative/v2/designdata/job",
-      {
-        input: {
-          urn: urn,
-        },
+    const base64Urn = Buffer.from(urn).toString("base64");
+
+    const jobPayload = {
+      input: {
+        urn: base64Urn,
+      },
+      output: {
+        formats: [
+          {
+            type: "svf",
+            views: ["2d", "3d"],
+          },
+        ],
+      },
+    };
+
+    const response = await axios.post<{
+      result: string;
+      urn: string;
+      acceptedJobs: {
         output: {
           formats: [
             {
-              type: "svf",
-              views: ["2d", "3d"],
-            },
-          ],
-        },
+              type: string;
+              views: string[];
+            }
+          ];
+        };
+      };
+    }>("http://localhost:3001/proxy/modelderivative/job", jobPayload, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*",
       },
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-      }
-    );
-    return response.data;
+    });
+
+    return response.data.acceptedJobs;
   } catch (error) {
     console.error(
       "Error translating DWG file:",
@@ -149,16 +155,20 @@ const translateDWGFile = async (token: string, urn: string) => {
 };
 
 // Function to check translation status
-const checkTranslationStatus = async (token: string, urn: string) => {
+const checkTranslationStatus = async (token: string, jobId: string) => {
+  console.log("Checking translation status for jobId:", jobId);
   try {
     const response = await axios.get(
-      `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/manifest`,
+      `https://developer.api.autodesk.com/modelderivative/v2/designdata/job/${jobId}/manifest`,
       {
         headers: {
           Authorization: `Bearer ${token}`,
+          "Access-Control-Allow-Origin": "*",
         },
       }
     );
+
+    console.log("Translation Status:", response.data);
     return response.data;
   } catch (error) {
     console.error(
@@ -169,42 +179,63 @@ const checkTranslationStatus = async (token: string, urn: string) => {
   }
 };
 
-// Function to get model metadata
-const getModelMetadata = async (token: string, urn: string) => {
-  try {
-    const response = await axios.get(
-      `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/metadata`,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      }
-    );
-    return response.data;
-  } catch (error) {
-    console.error(
-      "Error fetching model metadata:",
-      error.response ? error.response.data : error
-    );
-    throw new Error("Failed to fetch model metadata");
-  }
+// Function to encode URN to Base64
+const encodeURN = (urn: string) => {
+  return Buffer.from(urn).toString("base64");
 };
 
-// Function to generate a report
-const generateReport = (metadata: any) => {
-  const report = {
-    title: "DWG File Report",
-    date: new Date().toISOString(),
-    metadata: metadata,
-  };
-
-  return JSON.stringify(report, null, 2);
+// Function to extract URN from objectId
+const extractURN = (objectId: string) => {
+  return objectId.split(":")[1];
 };
 
-// Component to fetch token and handle bucket operations
+// Forge Viewer component
+const ForgeViewer = ({
+  urn,
+  accessToken,
+}: {
+  urn: string;
+  accessToken: string;
+}) => {
+  const viewerContainer = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (viewerContainer.current && urn) {
+      const options = {
+        env: "AutodeskProduction",
+        accessToken: accessToken,
+      };
+
+      Autodesk.Viewing.Initializer(options, function onInitialized() {
+        const viewer = new Autodesk.Viewing.GuiViewer3D(
+          viewerContainer.current
+        );
+        viewer.start();
+        const documentId = "urn:" + urn;
+
+        Autodesk.Viewing.Document.load(
+          documentId,
+          function (doc) {
+            const viewables = doc.getRoot().getDefaultGeometry();
+            viewer.loadDocumentNode(doc, viewables);
+          },
+          function (error) {
+            console.error("Failed to load document", error);
+          }
+        );
+      });
+    }
+  }, [urn, accessToken]);
+
+  return (
+    <div ref={viewerContainer} style={{ width: "100%", height: "100vh" }} />
+  );
+};
+
+// Main component
 export default function Home() {
   const [token, setToken] = useState<string | null>(null);
-  const [report, setReport] = useState<string | null>(null);
+  const [urn, setUrn] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -223,30 +254,20 @@ export default function Home() {
   const handleFileUpload = async (file: File) => {
     if (token) {
       try {
-        const { bucketKey, objectId } = await handleBucketAndUpload(
-          token,
-          file
-        );
-        const urn = Buffer.from(objectId).toString("base64"); // Encode objectId to base64
-
-        // Translate the DWG file
-        await translateDWGFile(token, urn);
+        const { objectId } = await handleBucketAndUpload(token, file);
+        const jobId = await translateDWGFile(token, objectId);
+        console.log("--- jobId:", jobId);
 
         // Poll for translation status
         let status;
         do {
-          status = await checkTranslationStatus(token, urn);
+          status = await checkTranslationStatus(token, jobId);
           if (status.progress === "complete") break;
           await new Promise((resolve) => setTimeout(resolve, 5000)); // Wait for 5 seconds before checking again
         } while (status.progress !== "complete");
 
-        // Get model metadata
-        const metadata = await getModelMetadata(token, urn);
-
-        // Generate and set the report
-        const generatedReport = generateReport(metadata);
-        setReport(generatedReport);
-        console.log("Report generated successfully.");
+        const translatedURN = extractURN(objectId);
+        setUrn(translatedURN);
       } catch (err: any) {
         setError(err.message);
       }
@@ -260,8 +281,7 @@ export default function Home() {
       <p>Autodesk Forge Integration</p>
       {token && <p>Token: {token}</p>}
       {error && <p>Error: {error}</p>}
-      {report && <pre>{report}</pre>}
-      {/* Add file input for testing */}
+      {urn && <ForgeViewer urn={urn} accessToken={token} />}
       <input
         type="file"
         onChange={(e) => e.target.files && handleFileUpload(e.target.files[0])}
