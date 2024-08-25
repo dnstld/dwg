@@ -46,7 +46,7 @@ const generateUniqueBucketKey = () => {
 
 // Function to handle bucket creation and file upload
 const handleBucketAndUpload = async (token: string, file: File) => {
-  const bucketKey = generateUniqueBucketKey(); // Generate a unique bucket key
+  const bucketKey = generateUniqueBucketKey();
 
   try {
     // Check if bucket exists or create it
@@ -84,7 +84,7 @@ const handleBucketAndUpload = async (token: string, file: File) => {
       {
         headers: {
           Authorization: `Bearer ${token}`,
-          "Content-Type": file.type || "application/octet-stream", // Use file type if available
+          "Content-Type": file.type || "application/octet-stream",
         },
       }
     );
@@ -100,6 +100,10 @@ const handleBucketAndUpload = async (token: string, file: File) => {
     // }
 
     console.log("Upload Response:", uploadResponse.data);
+    return {
+      bucketKey,
+      objectId: uploadResponse.data.objectId,
+    };
   } catch (error) {
     console.error(
       "Error in bucket creation or file upload:",
@@ -109,9 +113,98 @@ const handleBucketAndUpload = async (token: string, file: File) => {
   }
 };
 
+// Function to request translation
+const translateDWGFile = async (token: string, urn: string) => {
+  try {
+    const response = await axios.post(
+      "https://developer.api.autodesk.com/modelderivative/v2/designdata/job",
+      {
+        input: {
+          urn: urn,
+        },
+        output: {
+          formats: [
+            {
+              type: "svf",
+              views: ["2d", "3d"],
+            },
+          ],
+        },
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+    return response.data;
+  } catch (error) {
+    console.error(
+      "Error translating DWG file:",
+      error.response ? error.response.data : error
+    );
+    throw new Error("Failed to translate DWG file");
+  }
+};
+
+// Function to check translation status
+const checkTranslationStatus = async (token: string, urn: string) => {
+  try {
+    const response = await axios.get(
+      `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/manifest`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    );
+    return response.data;
+  } catch (error) {
+    console.error(
+      "Error checking translation status:",
+      error.response ? error.response.data : error
+    );
+    throw new Error("Failed to check translation status");
+  }
+};
+
+// Function to get model metadata
+const getModelMetadata = async (token: string, urn: string) => {
+  try {
+    const response = await axios.get(
+      `https://developer.api.autodesk.com/modelderivative/v2/designdata/${urn}/metadata`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    );
+    return response.data;
+  } catch (error) {
+    console.error(
+      "Error fetching model metadata:",
+      error.response ? error.response.data : error
+    );
+    throw new Error("Failed to fetch model metadata");
+  }
+};
+
+// Function to generate a report
+const generateReport = (metadata: any) => {
+  const report = {
+    title: "DWG File Report",
+    date: new Date().toISOString(),
+    metadata: metadata,
+  };
+
+  return JSON.stringify(report, null, 2);
+};
+
 // Component to fetch token and handle bucket operations
 export default function Home() {
   const [token, setToken] = useState<string | null>(null);
+  const [report, setReport] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -126,12 +219,34 @@ export default function Home() {
     fetchToken();
   }, []);
 
-  // Example usage with a file upload
+  // Handle file upload and processing
   const handleFileUpload = async (file: File) => {
     if (token) {
       try {
-        await handleBucketAndUpload(token, file);
-        console.log("File uploaded successfully.");
+        const { bucketKey, objectId } = await handleBucketAndUpload(
+          token,
+          file
+        );
+        const urn = Buffer.from(objectId).toString("base64"); // Encode objectId to base64
+
+        // Translate the DWG file
+        await translateDWGFile(token, urn);
+
+        // Poll for translation status
+        let status;
+        do {
+          status = await checkTranslationStatus(token, urn);
+          if (status.progress === "complete") break;
+          await new Promise((resolve) => setTimeout(resolve, 5000)); // Wait for 5 seconds before checking again
+        } while (status.progress !== "complete");
+
+        // Get model metadata
+        const metadata = await getModelMetadata(token, urn);
+
+        // Generate and set the report
+        const generatedReport = generateReport(metadata);
+        setReport(generatedReport);
+        console.log("Report generated successfully.");
       } catch (err: any) {
         setError(err.message);
       }
@@ -145,6 +260,7 @@ export default function Home() {
       <p>Autodesk Forge Integration</p>
       {token && <p>Token: {token}</p>}
       {error && <p>Error: {error}</p>}
+      {report && <pre>{report}</pre>}
       {/* Add file input for testing */}
       <input
         type="file"
